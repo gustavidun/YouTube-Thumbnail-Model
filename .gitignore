@@ -1,0 +1,8 @@
+.env
+/data_analysis/data
+.venv
+/data_fetcher/data
+/data_fetcher/__pycache__
+/thumbnail_labeler/__pycache__
+/thumbnail_labeler/data.pkl
+/thumbnail_labeler/videos.pkl

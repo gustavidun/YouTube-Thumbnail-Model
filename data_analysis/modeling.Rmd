@@ -1,0 +1,510 @@
+---
+title: "modeling"
+author: "Gustav Idun Sloth"
+date: "2024-12-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(pacman)
+
+pacman::p_load("lme4", "tidyverse", "lmerTest", "MuMIn", "performance", "see", "MASS", "glmmTMB", "influence.ME", "car", "gridExtra", "ggtext", "AER", "fitdistrplus", "caret", "simex", "DHARMa")
+
+
+```
+
+
+```{r load data}
+setwd(".")
+df <- read_csv("data/videos_labeled.csv")
+ground_truth.views <- read_csv("data/ground/ground_truth_views.csv")
+ground_preds.views <- read_csv("data/ground/ground_preds_views.csv")
+ground_truth.all <- read_csv("data/ground/ground_truth.csv")
+ground_preds.all <- read_csv("data/ground/ground_preds.csv")
+
+process_data <- function(dat) {
+  
+  #collapse faces into neutral, none and non-neutral
+  dat <- dat %>%
+    mutate(faces = case_when(
+      faces == "none" ~ "none",
+      faces == "neutral" ~ "neutral",
+      TRUE ~ "non-neutral" # All other levels
+    ))
+  
+  dat$faces <- as.factor(dat$faces)
+  dat$faces = relevel(dat$faces, ref="neutral")
+  dat$arrows = as.factor(dat$arrows)
+  
+  dat <- dat[!duplicated(dat$video_id), ]
+
+  return(dat)
+  
+}
+
+df <- process_data(df)
+ground_truth.views <- process_data(ground_truth.views)
+ground_preds.views <- process_data(ground_preds.views)
+ground_truth.all <- process_data(ground_truth.all)
+ground_preds.all <- process_data(ground_preds.all)
+
+```
+```{r data summary}
+summary(df$day19)
+var(df$day19)
+sd(df$day19)
+
+# List of grouping variables
+group_vars <- c("conflict", "cliffhanger", "text", "juxtaposition", "monochrony", "arrows", "faces")
+
+# Calculate conditional mean and variance for each grouping variable
+results <- lapply(group_vars, function(var) {
+    with(df, tapply(df$day19, df[[var]], function(x) {
+        sprintf("M (SD) = %1.2f (%1.2f)", mean(x, na.rm = TRUE), sd(x, na.rm = TRUE))
+    }))
+})
+
+# Name the results by the grouping variables
+names(results) <- group_vars
+
+# View results
+results
+
+# Reshape the data for plotting
+plot_data <- do.call(rbind, lapply(group_vars, function(var) {
+    df_subset <- df[, c(var, "day19")]
+    df_subset$group_var <- var
+    names(df_subset) <- c("group_level", "day19", "group_var")
+    df_subset
+}))
+
+# Drop NA values for plotting
+plot_data <- na.omit(plot_data)
+
+# Create the plot with a log-scaled x-axis
+ggplot(plot_data, aes(x = day19+1, fill = group_level)) +
+    geom_density(alpha = 0.6) +
+    facet_wrap(~group_var, scales = "free", ncol = 2) +
+    scale_x_log10() +  # Apply log10 scale to the x-axis
+    labs(title = "Conditional Distributions of day 20 (Log Scale)",
+         x = "Day 20 + 1 (Log Scale)",
+         y = "Density") +
+    theme_minimal() +
+    theme(legend.position = "bottom") +
+    guides(fill = guide_legend(title = "Group Level"))
+
+ggsave(
+    filename = "plots/conditional_distributions_log_scale.png",  # File name
+    plot = last_plot(),                                    # Use the last created plot
+    width = 10,                                            # Width in inches
+    height = 15,                                            # Height in inches
+    dpi = 300                                              # Resolution in dots per inch
+)
+
+```
+
+```{r distribution fits }
+
+fit_pois <- fitdistr(df$day19, "Poisson")
+fit_nb <- fitdistr(df$day19, "negative binomial")
+
+# Print results
+fit_pois
+fit_nb
+
+AIC(fit_pois, fit_nb)
+
+# Fit the distributions
+fit_pois <- fitdistr(df$day19, "Poisson")
+fit_nb <- fitdistr(df$day19, "negative binomial")
+
+```
+
+```{r model comparisons}
+options(scipen = 2)
+
+ols_model <- lmer(log(day19 + 1) ~ conflict + text + juxtaposition + cliffhanger + arrows + monochrony + faces + (1|channel_title)+ (1|category), data = df)
+
+nb_model <- glmmTMB(day19 ~ conflict + text + juxtaposition + cliffhanger + arrows + monochrony + faces + (1|channel_title) + (1|category), data = df, family="nbinom2", control = glmmTMBControl(parallel=5))
+
+nb_model_nocat <- glmmTMB(day19 ~ conflict + text + juxtaposition + cliffhanger + arrows + monochrony + faces + (1|channel_title), data = df, family="nbinom2", control = glmmTMBControl(parallel=5))
+
+poisson_model <- glmmTMB(day19 ~ conflict + text + juxtaposition + cliffhanger + arrows + monochrony + faces + (1|channel_title) + (1|category), data = df, family="poisson", control = glmmTMBControl(parallel=5), ziformula = ~1)
+
+AIC(ols_model, nb_model, nb_model_nocat, poisson_model)
+```
+```{r glm test}
+options(scipen = 2)
+glm_test <- glm.nb(day19 ~ conflict + text + juxtaposition + cliffhanger + arrows + monochrony + faces, data = df, x = T, y = T)
+
+summary(glm_test)
+```
+
+```{r fitting models on ground truth/pred}
+
+ground_truth_model <- glmmTMB(day19 ~ conflict + text + juxtaposition + cliffhanger + arrows + monochrony + faces + (1|channel_title), data = ground_truth.views, family="nbinom2", control = glmmTMBControl(parallel=5))
+
+ground_preds_model <- glmmTMB(day19 ~ conflict + text + juxtaposition + cliffhanger + arrows + monochrony + faces + (1|channel_title), data = ground_preds.views, family="nbinom2", control = glmmTMBControl(parallel=5))
+
+summary(ground_truth_model)
+summary(ground_preds_model)
+
+```
+
+```{r fit models for each day}
+
+# Select the range of columns for the days
+day_columns <- df[, grep("day", names(df))]
+
+# Fit models for each day
+models_naive <- lapply(names(day_columns), function(day) {
+  glmmTMB(as.formula(paste(day, "~ conflict + text + juxtaposition + cliffhanger + arrows + monochrony + faces + (1|channel_title)")), data = df, family="nbinom2", control = glmmTMBControl(parallel=5))
+})
+
+# Name the models with the day column names
+names(models_naive) <- names(day_columns)
+
+```
+
+```{r}
+
+summary(models_naive$day0)
+summary(models_naive$day19)
+
+```
+
+```{r calculate IRR values}
+# Extract fixed effects
+coefficients <- summary(models_naive$day0)$coefficients$cond
+
+# Calculate IRRs (exp of coefficients)
+IRRs <- exp(coefficients[, "Estimate"])
+
+IRRs
+```
+```{r mcsimex}
+
+mc_matrices <- list()
+conf_matrices <- list()
+
+# create misclassification matrices 
+for (var in group_vars) {
+  # Ground truth and predicted values
+  truth <- ground_truth.all[[var]]
+  preds <- ground_preds.all[[var]]
+  
+  # Get unique factor levels
+  levels <- unique(c(levels(factor(truth)), levels(factor(preds))))
+  
+  # Create an empty matrix with proper dimensions
+  mc_matrix <- matrix(0, nrow = length(levels), ncol = length(levels))
+  
+  # Fill the matrix with probabilities
+  for (i in seq_along(levels)) {
+    for (j in seq_along(levels)) {
+      # Calculate conditional probability P(observed = j | true = i)
+      true_i <- truth == levels[i]
+      pred_j <- preds == levels[j]
+      if (sum(true_i) > 0) {
+        mc_matrix[j, i] <- sum(pred_j & true_i) / sum(true_i)
+      }
+    }
+  }
+  
+  # Set proper dimension names
+  dimnames(mc_matrix) <- list(levels, levels)
+  
+  # Assign the matrix to the list with variable name
+  mc_matrices[[var]] <- mc_matrix
+  
+  # Print the matrix for inspection
+  cat("\nMisclassification Matrix for:", var, "\n")
+  print(mc_matrix)
+}
+
+#mcsimex
+simex_model <- mcsimex(
+  model = glm_test,
+  SIMEXvariable = "arrows",
+  mc.matrix = mc_matrices$arrows
+)
+
+summary(simex_model)
+
+```
+```{r custom mc simex implementation}
+
+mc_simex_glmmTMB <- function(model, data, X_col, lambda_seq, B, misclassification_matrix) {
+  
+  # Placeholder for beta estimates for each lambda
+  beta_lambda <- matrix(NA, nrow = length(lambda_seq), ncol = length(fixef(model)$cond))
+  colnames(beta_lambda) <- names(fixef(model)$cond)
+  
+  # Simulation Step
+  for (l in seq_along(lambda_seq)) {
+    lambda <- lambda_seq[l]
+    beta_rep <- matrix(NA, nrow = B, ncol = length(fixef(model)$cond))
+    
+    for (i in 1:B) {
+      # Generate X(lambda)_i by introducing misclassification
+      perturbed_X <- data[[X_col]]  # Copy the original predictor
+      misclassified_X <- rbinom(length(perturbed_X), 1, misclassification_matrix[1, 1] + lambda)
+      
+      # Create new data set with perturbed X
+      new_data <- data
+      new_data[[X_col]] <- misclassified_X
+      
+      # Refit the model with perturbed data
+      fit <- glmmTMB(
+        formula = formula(model),
+        data = new_data,
+        family = family(model)
+      )
+      beta_rep[i, ] <- fixef(fit)$cond
+    }
+    
+    # Calculate beta(lambda) as the average of beta(lambda)_i
+    beta_lambda[l, ] <- colMeans(beta_rep, na.rm = TRUE)
+  }
+  
+  # Extrapolation Step
+  beta_extrapolated <- matrix(NA, nrow = ncol(beta_lambda), ncol = 1)
+  rownames(beta_extrapolated) <- colnames(beta_lambda)
+  
+  for (j in seq_along(beta_lambda[1, ])) {
+    # Fit a quadratic model to beta(lambda)
+    fit_extrapolation <- lm(beta_lambda[, j] ~ poly(lambda_seq, 2))
+    
+    # Extrapolate to lambda = -1
+    beta_extrapolated[j, ] <- predict(fit_extrapolation, newdata = data.frame(lambda_seq = -1))
+  }
+  
+  # Return the extrapolated coefficients
+  return(beta_extrapolated)
+}
+
+# Example Usage
+# Simulate some example data
+set.seed(42)
+example_data <- data.frame(
+  response = rpois(100, lambda = 5),
+  predictor = rbinom(100, 1, 0.5),
+  z1 = rnorm(100)
+)
+
+# Fit a glmmTMB model
+example_model <- glmmTMB(response ~ predictor + z1, family = nbinom2, data = example_data)
+
+# Define misclassification matrix (example, modify as needed)
+misclassification_matrix <- matrix(c(0.9, 0.1, 0.1, 0.9), nrow = 2, byrow = TRUE)
+
+# Run MC-SIMEX
+beta_mc_simex <- mc_simex_glmmTMB(
+  model = example_model,
+  data = example_data,
+  X_col = "predictor",
+  lambda_seq = seq(0, 2, by = 0.5),  # Lambda values
+  B = 100,  # Number of iterations
+  misclassification_matrix = misclassification_matrix
+)
+
+print(beta_mc_simex)
+
+```
+
+
+```{r}
+# create confusion matrices
+for (var in group_vars) {
+  # Ground truth and predicted values
+  truth <- ground_truth.all[[var]]
+  preds <- ground_preds.all[[var]]
+  
+  # Create confusion matrix
+  conf_matrix <- confusionMatrix(factor(preds), factor(truth), positive="TRUE")
+
+  conf_matrices[[var]] <- conf_matrix
+  
+  # Print the matrix for inspection
+  cat("\nMisclassification Matrix for:", var, "\n")
+  print(conf_matrix)  
+}
+```
+
+
+```{r coefs}
+
+coefs <- list()
+
+for (mod in models_naive) {
+  # Extract coefficients as a named vector
+  coefsTemp <- unlist(fixef(mod))
+  
+  # Append the log-likelihood to the coefficients
+  loglik_value <- as.numeric(logLik(mod))
+  r2m <- r2(mod)
+  coefsTemp <- c(coefsTemp, loglik = loglik_value, r2m$R2_marginal, r2m$R2_conditional)
+  
+  # Append the updated coefsTemp to the main list
+  coefs <- append(coefs, list(coefsTemp))
+}
+
+# Convert the list to a data frame by combining rows
+coefs_df <- do.call(rbind, coefs)
+
+# Convert the result to a data frame and assign column names
+coefs_df <- as.data.frame(coefs_df)
+
+print(coefsTemp)
+
+```
+
+```{r plot coefs}
+
+# Convert to long format using pivot_longer
+df_long <- coefs_df %>%
+  pivot_longer(cols = everything(), 
+               names_to = "Coefficient", 
+               values_to = "Value")
+
+# Add a 'model' column
+df_long$model <- rep(1:nrow(coefs_df), each = ncol(coefs_df))
+
+df_long <- df_long %>% filter(Coefficient != "cond.(Intercept)" & Coefficient != "disp.(Intercept)" & Coefficient != "loglik" & Coefficient != "Conditional R2" & Coefficient != "Marginal R2")
+
+# Plot multiple lines using index as x
+ggplot(df_long, aes(x=model, y = Value, color = Coefficient, group = Coefficient)) +
+  geom_line() + 
+  geom_point() +
+  labs(title = "Coefficients Across Models", x = "Days since upload", y = "Value") +
+  theme_minimal()
+
+marg <- ggplot(coefs_df, aes(x=1:20, y=`Marginal R2`)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Model fit over time", x = "Days since upload", y = "Marginal R<sup>2</sup>") +
+  theme(axis.title.y = element_markdown(), plot.title = element_markdown())
+
+cond <- ggplot(coefs_df, aes(x=1:20, y=`Conditional R2`)) +
+  geom_line() +
+  geom_point() +
+  labs(axis.text.y = element_markdown(), title = "Model fit over time", x = "Days since upload", y = "Conditional R<sup>2</sup>") +
+  theme(axis.title.y = element_markdown(), plot.title = element_markdown())
+
+grid.arrange(marg, cond, ncol=2)
+
+```
+```{r dharma diagnostics residuals}
+
+#residuals
+sim_res <- simulateResiduals(fittedModel = models_naive$day19, n = 1000)
+
+```
+
+```{r}
+
+plot(sim_res)
+testDispersion(sim_res)
+testZeroInflation(sim_res)
+testOutliers(sim_res)
+
+```
+```{r}
+
+testResiduals(sim_res)
+
+```
+
+
+
+```{r AIC BIC comparison}
+# Calculate AIC and BIC for both models
+ols_aic <- AIC(ols_model)
+ols_bic <- BIC(ols_model)
+
+nb_aic <- AIC(nb_model)
+nb_bic <- BIC(nb_model)
+
+# Print comparison
+cat("Model Comparison:\n")
+cat("OLS Model:    AIC =", ols_aic, " | BIC =", ols_bic, "\n")
+cat("NB Model:     AIC =", nb_aic, " | BIC =", nb_bic, "\n")
+```
+```{r diagnostics}
+
+diagnostics = check_model(model2_binom)
+ggsave("plots/diagnostics_binom.png", width=9, height=16, dpi=300)
+
+diagnostics2 = check_model(model2)
+ggsave("plots/diagnostics_log.png", width=9, height=16, dpi=300)
+
+```
+```{r OLS diagnostics}
+
+# Residuals for OLS
+ols_residuals <- residuals(ols_model)
+
+# Plot OLS Residuals
+par(mfrow = c(1, 3))  # Set up side-by-side plots
+
+# Histogram of residuals
+hist(ols_residuals, breaks = 30, main = "Histogram of OLS Residuals", 
+     xlab = "Residuals", col = "skyblue", border = "white")
+
+# Residuals vs. Fitted values
+plot(fitted(ols_model), ols_residuals, main = "OLS Residuals vs Fitted", 
+     xlab = "Fitted Values", ylab = "Residuals", col = "blue", pch = 20)
+abline(h = 0, col = "red", lwd = 2)
+
+# QQ Plot for OLS Residuals
+qqnorm(ols_residuals, main = "QQ Plot of OLS Residuals", col = "blue", pch = 20)
+qqline(ols_residuals, col = "red", lwd = 2)  # Add a reference line
+
+```
+
+```{r NB diagnostics}
+
+# Residuals for NB
+nb_residuals <- residuals(nb_model, type = "deviance")
+
+# Plot NB Residuals
+par(mfrow = c(1, 3))  # Set up side-by-side plots
+
+# Histogram of residuals
+hist(nb_residuals, breaks = 30, main = "Histogram of NB Residuals", 
+     xlab = "Residuals", col = "lightgreen", border = "white")
+
+# Residuals vs. Fitted values
+plot(fitted(nb_model), nb_residuals, main = "NB Residuals vs Fitted", 
+     xlab = "Fitted Values", ylab = "Residuals", col = "darkgreen", pch = 20)
+abline(h = 0, col = "red", lwd = 2)
+
+# QQ Plot for NB Residuals
+qqnorm(nb_residuals, main = "QQ Plot of NB Residuals", col = "darkgreen", pch = 20)
+qqline(nb_residuals, col = "red", lwd = 2)
+
+```
+```{r predicted vs observed}
+
+# OLS Predictions (exponentiate log predictions for comparison with raw views)
+ols_predictions <- exp(predict(ols_model))
+
+# NB Predictions
+nb_predictions <- predict(nb_model, type = "response")
+
+# Plot Observed vs. Predicted
+ggplot(df, aes(x = day19)) +
+  geom_point(aes(y = ols_predictions), color = "blue", alpha = 0.5) +
+  geom_point(aes(y = nb_predictions), color = "green", alpha = 0.5) +
+  labs(title = "Observed vs Predicted Counts",
+       x = "Observed View Counts", y = "Predicted View Counts") +
+  theme_minimal() +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed")
+
+```
+```{r}
+
+```
+
+

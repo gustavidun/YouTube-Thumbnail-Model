@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" type="text/css" href="style.css" />
+    <title>Thumbnail Labeler</title>
+</head>
+<body>
+    <div class = "main">
+        <img src = "" id = "thumbnail">
+        <div class = "labels">
+            <label class="switch">
+                <input type="checkbox" id = "question">
+                <span class="slider round">Question</span>
+            </label>
+            <label class="switch">
+                <input type="checkbox" id = "text">
+                <span class="slider round">Text</span>
+            </label>
+            <label class="switch">
+                <input type="checkbox" id = "arrows">
+                <span class="slider round">Arrows</span>
+            </label>
+            <label class="switch">
+                <input type="checkbox" id = "monochrony">
+                <span class="slider round">Monochrony</span>
+            </label>
+            <label class="switch">
+                <input type="checkbox" id = "juxtaposition">
+                <span class="slider round">Juxtaposition</span>
+            </label>
+            <label class="switch">
+                <input type="checkbox" id = "conflict">
+                <span class="slider round">Conflict</span>
+            </label>
+            <label class="switch">
+                <input type="checkbox" id = "cliffhanger">
+                <span class="slider round">Cliffhanger</span>
+            </label>
+            <div class="custom-select" style="width:200px;">
+                <span style = "margin-bottom: 0.5rem;">Faces</span>
+                <select id="faces">
+                    <option value="none">None</option>
+                    <option value="angry">Angry</option>
+                    <option value="disgusted">Disgusted</option>
+                    <option value="fearful">Fearful</option>
+                    <option value="happy">Happy</option>
+                    <option value="sad">Sad</option>
+                    <option value="surprised">Surprised</option>
+                    <option value="neutral">Neutral</option>
+                </select>
+            </div>
+        </div>
+        <div class = "nav">
+            <button onclick="get_thumbnail(cur_item - 1)">Previous</button><button onclick="get_thumbnail(cur_item + 1)">Next</button> 
+        </div>
+    </div>
+    <script src = "dropdown.js"></script>
+    <script src = "main.js"></script>
+</body>
+</html>
